@@ -1,0 +1,73 @@
+name: 'namazu-cloud-addon-runner'
+description: >-
+  Applies one addon repo (one Terraform root) to one tenant, resolves
+  manifest.yaml bindings from existing statefiles, enforces the
+  namazu-cloud-addon contract (naming grammar, ref grammar, `$`/`!`
+  sensitivity gate, shared/private visibility), and sweeps orphaned addon
+  states. Shared CODE, not shared authority: OIDC trust belongs to the
+  calling fork (configure aws-actions/configure-aws-credentials before
+  this action); this action grants nothing.
+inputs:
+  mode:
+    description: 'apply | sweep | plan | audit'
+    required: true
+  repo:
+    description: 'owner/name of the addon repo. Defaults to the job''s own repository (repo-less entries apply the fork''s local root).'
+    required: false
+  ref:
+    description: 'Full 40-hex SHA or protected v<semver> tag. Defaults to the checked-out job SHA. Branch names are rejected.'
+    required: false
+  region:
+    description: 'AWS region of the state bucket'
+    required: true
+  bucket:
+    description: 'State bucket (the tenant baseline''s backend bucket)'
+    required: true
+  instance:
+    description: 'instance_id (OR workspace — exactly one; the other stays empty)'
+    required: false
+  workspace:
+    description: 'workspace_id (OR instance — exactly one; the other stays empty)'
+    required: false
+  organization_id:
+    description: 'The org''s database unique id — constant per org fork. Feeds the audit tags and the private-addon (owner_org) check.'
+    required: true
+  eks_cluster_name:
+    description: 'EKS cluster name for the addon root''s provider wiring (contract variable).'
+    required: false
+  eks_cluster_role_arn:
+    description: 'IAM role ARN the EKS exec plugin assumes (contract variable).'
+    required: false
+  index_file:
+    description: 'Path to addons.index.json (workflow entries: [{addon, ref, instance, workspace}]). Required for mode: sweep.'
+    required: false
+  tidy:
+    description: 'true = after a successful sweep destroy, delete the emptied addon state key from S3 (needs s3:DeleteObject on addon keys). Default false.'
+    required: false
+    default: 'false'
+  work_dir:
+    description: 'Working directory for checkouts and runs. Default .addons-work'
+    required: false
+    default: '.addons-work'
+runs:
+  using: composite
+  steps:
+    - id: run
+      shell: bash
+      env:
+        INPUT_MODE: ${{ inputs.mode }}
+        INPUT_REPO: ${{ inputs.repo }}
+        INPUT_REF: ${{ inputs.ref }}
+        INPUT_REGION: ${{ inputs.region }}
+        INPUT_BUCKET: ${{ inputs.bucket }}
+        INPUT_INSTANCE: ${{ inputs.instance }}
+        INPUT_WORKSPACE: ${{ inputs.workspace }}
+        INPUT_ORGANIZATION_ID: ${{ inputs.organization_id }}
+        INPUT_EKS_CLUSTER_NAME: ${{ inputs.eks_cluster_name }}
+        INPUT_EKS_CLUSTER_ROLE_ARN: ${{ inputs.eks_cluster_role_arn }}
+        INPUT_INDEX_FILE: ${{ inputs.index_file }}
+        INPUT_TIDY: ${{ inputs.tidy }}
+        INPUT_WORK_DIR: ${{ inputs.work_dir }}
+      run: |
+        set -euo pipefail
+        "${{ github.action_path }}/bin/action.sh" "${{ github.action_path }}"
