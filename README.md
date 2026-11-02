@@ -29,7 +29,46 @@ never grant anything. Contract: [`namazu-cloud-instance` → `tenant-addons-plan
   bucket listing and destroys: vanished tenants, entries no longer named.
 - `audit` — read-only inventory of every `addon_*.tfstate` key.
 
+## CLI reference (src/addons_cli.py — the action wraps exactly these)
+
+| Flag | Required | Meaning |
+|---|---|---|
+| `--mode` | ✔ | `apply` \| `plan` \| `sweep` \| `audit` |
+| `--region` / `--bucket` | ✔ | state-bucket geometry |
+| `--organization-id` | ✔ | the org's **database unique id**; feeds audit tags + private (`owner_org`) enforcement |
+| `--repo` | apply/plan | `owner/name`; omitted ⇒ repo-less entry = the fork's own local root (id derived from `GITHUB_REPOSITORY`) |
+| `--ref` | external entries | 40-hex SHA or `v<semver>`; external + empty = hard error (a pin never defaults off-fork) |
+| `--instance` / `--workspace` | ✔ (exactly one) | the tenant; the other stays empty |
+| `--eks-cluster-name` / `--eks-cluster-role-arn` | k8s addons | contract vars for the provider wiring |
+| `--contract KEY=JSON` | no | extra contract variable, repeatable (`--contract billable=false`); loses to explicit manifest bindings (clause 10) |
+| `--index-file` | sweep | `addons.index.json`, see schema below |
+| `--tidy` | sweep | after a successful destroy, `s3 rm` the emptied state key (+ `.tflock`) |
+| `--work-dir` | no | scratch space for foreign checkouts (default `.addons-work`) |
+| `--caller-root` | no | the calling fork's checkout (repo-less entries run here) |
+
+### `addons.index.json` (the sweep's input; generated from a fork's workflow)
+
+```json
+[
+  { "addon": "NamazuStudios/namazu-cloud-addon-waf", "ref": "v1.2.0",
+    "instance": "acme-prod", "workspace": "" },
+  { "addon": "", "ref": "_fork_", "instance": "acme-prod", "workspace": "" }
+]
+```
+
+Local-root entries (`addon: ""`) are attributed to the fork's own repo by the
+lint that generates the index (`extract_entries` refuses `${{ }}` entries —
+matrix literals only). The sweep acts ONLY on ids its fork's index names or
+its own suffix; foreign states are never touched.
+
+### Exit codes
+
+`0` success (including a skip-by-design); `2` contract violation (loud,
+named); `3` external failure (aws/git/terraform). Sweep failures warn and
+count — the job fails at the end if any destroy failed.
+
 ## Local usage
+
 
 ```bash
 python3 -m pip install 'PyYAML>=6'

@@ -673,8 +673,14 @@ def mode_sweep(args) -> None:
             failures += 1
             loud(f"ADDON SWEEP FAILURE (retry next cron): {key} → {err}")
     if failures:
-        loud(f"sweep finished with {failures} failure(s); they retry on the "
-             "next run — two consecutive misses demand attention")
+        # the sweep itself is best-effort (warn-and-continue per addon), but
+        # the JOB ends failed so the lag is observable, never silent; the
+        # remaining orphans retry on the next cron.
+        raise ExternalError(
+            f"sweep finished with {failures} failure(s) — the failed keys "
+            "stay installed until the next sweep; two consecutive misses "
+            "demand attention"
+        )
 
 
 def gh_suffix() -> str:
