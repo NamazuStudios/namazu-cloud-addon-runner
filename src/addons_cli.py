@@ -690,7 +690,9 @@ def destroy_one(args, aid: str, meta: Dict[str, str], kind: str, tenant: str,
                 key: str) -> None:
     state_key = key
     root = args.caller_root
-    if meta.get("repo") and "/" in meta["repo"]:
+    gh_repo = os.environ.get("GITHUB_REPOSITORY") or ""
+    if meta.get("repo") and meta["repo"] != gh_repo:
+        # foreign addon: destroy with the provider shell of ITS pinned ref
         owner_name = meta["repo"]
         ref = meta.get("ref") or ""
         if ref:
@@ -698,11 +700,20 @@ def destroy_one(args, aid: str, meta: Dict[str, str], kind: str, tenant: str,
         token = os.environ.get("ELEMENTS_GIT_TOKEN")
         root = os.path.join(args.work_dir, repo_dirname(owner_name))
         clone_repo(owner_name, ref, root, token)
-    manifest = load_manifest(os.path.join(root, "manifest.yaml"),
-                             args.organization_id)
+    else:
+        # fork-local root (index entry with no /addon: → this fork's repo):
+        # use the sweep job's own checkout — never re-clone against the fork.
+        if aid != gh_suffix():
+            raise ContractError(
+                f"sweep refuses to destroy state for addon '{aid}' without a "
+                "pinned checkout source (not this fork's local root)"
+            )
+        log(f"destroy: fork-local root {aid} from the job's own checkout")
     # destroy needs the provider shell only: contract vars satisfy the root's
     # variable references; manifest BINDINGS are deliberately not resolved —
     # teardown must never depend on wiring still resolving.
+    manifest = load_manifest(os.path.join(root, "manifest.yaml"),
+                             args.organization_id)
     tfvars = contract_vars(args)
     tfvars_path = emit_tfvars(os.path.join(root, "."), tfvars)
     backend = build_backend_config(root, args.region, args.bucket, state_key)
