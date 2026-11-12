@@ -32,6 +32,9 @@ inputs:
   organization_id:
     description: 'The org''s database unique id — constant per org fork. Feeds the audit tags and the private-addon (owner_org) check.'
     required: true
+  contract:
+    description: 'Extra contract variables: one KEY=JSON pair per line, forwarded as repeatable --contract flags (e.g. gpu=''{"g5_enabled":true}''). Empty/unset = none. Loses to explicit manifest bindings.'
+    required: false
   eks_cluster_name:
     description: 'EKS cluster name for the addon root''s provider wiring (contract variable).'
     required: false
@@ -63,6 +66,7 @@ runs:
         INPUT_INSTANCE: ${{ inputs.instance }}
         INPUT_WORKSPACE: ${{ inputs.workspace }}
         INPUT_ORGANIZATION_ID: ${{ inputs.organization_id }}
+        INPUT_CONTRACT: ${{ inputs.contract }}
         INPUT_EKS_CLUSTER_NAME: ${{ inputs.eks_cluster_name }}
         INPUT_EKS_CLUSTER_ROLE_ARN: ${{ inputs.eks_cluster_role_arn }}
         INPUT_INDEX_FILE: ${{ inputs.index_file }}

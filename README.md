@@ -23,7 +23,9 @@ never grant anything. Contract: [`namazu-cloud-instance` → `tenant-addons-plan
 - `apply` / `plan` — one addon × one tenant. Input contract:
   `mode, region, bucket, instance|workspace, organization_id` +
   (`repo`, `ref` for foreign addons; omitted ⇒ the fork's own local root) +
-  optional `eks_cluster_name`, `eks_cluster_role_arn`, `index_file`, `tidy`.
+  optional `eks_cluster_name`, `eks_cluster_role_arn`, `index_file`, `tidy`,
+  `contract` (KEY=JSON pairs → `--contract`; the addon-config channel once
+  baselines stop exporting addon outputs — see namazu-cloud-instance#130).
 - `sweep` — needs `index_file` (`addons.index.json`, the materialized
   workflow entries). Enumerates `tenants/*/*/addon_<id>.tfstate` from the
   bucket listing and destroys: vanished tenants, entries no longer named.
@@ -40,7 +42,7 @@ never grant anything. Contract: [`namazu-cloud-instance` → `tenant-addons-plan
 | `--ref` | external entries | 40-hex SHA or `v<semver>`; external + empty = hard error (a pin never defaults off-fork) |
 | `--instance` / `--workspace` | ✔ (exactly one) | the tenant; the other stays empty |
 | `--eks-cluster-name` / `--eks-cluster-role-arn` | k8s addons | contract vars for the provider wiring |
-| `--contract KEY=JSON` | no | extra contract variable, repeatable (`--contract billable=false`); loses to explicit manifest bindings (clause 10) |
+| `--contract KEY=JSON` | no | extra contract variable, repeatable (`--contract billable=false`); loses to explicit manifest bindings (clause 10). Exposed by `action.yml` as the `contract` input: one `KEY=JSON` pair per line, blank lines skipped |
 | `--index-file` | sweep | `addons.index.json`, see schema below |
 | `--tidy` | sweep | after a successful destroy, `s3 rm` the emptied state key (+ `.tflock`) |
 | `--work-dir` | no | scratch space for foreign checkouts (default `.addons-work`) |
