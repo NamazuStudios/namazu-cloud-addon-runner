@@ -133,3 +133,20 @@ addon.cloud.namazustudios.com/description-<id>_<variant> = manifest.yaml descrip
 python3 -m pip install 'PyYAML>=6' pytest
 python3 -m pytest tests -q
 ```
+
+## License & why this repository is public
+
+**AGPL-3.0** — see [LICENSE](LICENSE).
+
+This repository is made public for **transparency and visibility**: it is
+deeply connected to Namazu Cloud — the contract it enforces, the state
+bijection it manages, and the tenant namespaces it serves ARE the platform.
+Publishing it lets every tenant and every org fork read exactly what the
+addon ecosystem does on their behalf.
+
+It is written **for Namazu Studios and Namazu Cloud use, and only us**: it
+is the org-internal executor of the addon contract. Derivative works are
+expected to come back to us, **no exceptions** — AGPL-3.0's network
+copyleft applies to anything offering this as a service, and we ask that
+improvements be contributed upstream to `NamazuStudios`, where they are
+reviewed and merged through the normal PR process.
