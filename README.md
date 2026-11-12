@@ -138,6 +138,8 @@ python3 -m pytest tests -q
 
 **AGPL-3.0** — see [LICENSE](LICENSE).
 
+Part of the [Namazu Cloud Addon system](https://github.com/NamazuStudios/namazu-cloud-addon).
+
 This repository is made public for **transparency and visibility**: it is
 deeply connected to Namazu Cloud — the contract it enforces, the state
 bijection it manages, and the tenant namespaces it serves ARE the platform.
