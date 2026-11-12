@@ -17,6 +17,9 @@ inputs:
   ref:
     description: 'Full 40-hex SHA or protected v<semver> tag. Defaults to the checked-out job SHA. Branch names are rejected.'
     required: false
+  variant:
+    description: 'REQUIRED: the install''s variant slug (the matrix entry''s name for this install) — statefile addon_<id>_<variant>.tfstate'
+    required: false
   region:
     description: 'AWS region of the state bucket'
     required: true
@@ -56,6 +59,7 @@ runs:
       shell: bash
       env:
         INPUT_MODE: ${{ inputs.mode }}
+        INPUT_VARIANT: ${{ inputs.variant }}
         INPUT_REPO: ${{ inputs.repo }}
         INPUT_REF: ${{ inputs.ref }}
         INPUT_REGION: ${{ inputs.region }}

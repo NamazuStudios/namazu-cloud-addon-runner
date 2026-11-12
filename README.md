@@ -11,17 +11,17 @@ never grant anything. Contract: [`namazu-cloud-instance` → `tenant-addons-plan
 |---|---|
 | Naming grammar | repo must be `NamazuStudios/namazu-cloud-addon-<id>`, `<id>` DNS-1123-ish; `<id>` becomes the addon id via the bijection |
 | Ref grammar | full 40-hex SHA **or** protected `v<MAJOR>.<MINOR>.<PATCH>` tag; branches (incl. `main`) always rejected |
-| Bijection | statefile = `addon_<id>.tfstate` under the tenant prefix; backend key per invocation |
+| Bijection | statefile = `addon_<id>_<variant>.tfstate` under the tenant prefix (variant REQUIRED from the entry — ids never contain `_`, so the first underscore always splits id \| variant); backend key per invocation |
 | Tenant existence | baseline `terraform.tfstate` presence decides skip/apply (clause 9) |
-| References | `$instance.<out>[.<key>…]` / `$addon.<id>.<out>…` resolved from statefiles; missing ⇒ loud failure naming ref + owner |
+| References | `$instance.<out>[.<key>…]` / `$addon.<id>.<variant>.<out>…` resolved from statefiles; missing ⇒ loud failure naming ref + owner |
 | Sensitivity gate | `$` on a sensitive output = hard error; `!` = acknowledged override, value rides `TF_VAR_*` env only (never on disk, never logged) |
 | Visibility | private addons consumable only by the fork whose `organization_id` = `owner_org` |
 | Sweep | destroy-from-state: provider shell + statefile suffice; no resource configs needed |
 
 ## Modes
 
-- `apply` / `plan` — one addon × one tenant. Input contract:
-  `mode, region, bucket, instance|workspace, organization_id` +
+- `apply` / `plan` — one (addon, variant) × one tenant. Input contract:
+  `mode, variant (REQUIRED), region, bucket, instance|workspace, organization_id` +
   (`repo`, `ref` for foreign addons; omitted ⇒ the fork's own local root) +
   optional `eks_cluster_name`, `eks_cluster_role_arn`, `index_file`, `tidy`.
 - `sweep` — needs `index_file` (`addons.index.json`, the materialized
@@ -38,6 +38,7 @@ never grant anything. Contract: [`namazu-cloud-instance` → `tenant-addons-plan
 | `--organization-id` | ✔ | the org's **database unique id**; feeds audit tags + private (`owner_org`) enforcement |
 | `--repo` | apply/plan | `owner/name`; omitted ⇒ repo-less entry = the fork's own local root (id derived from `GITHUB_REPOSITORY`) |
 | `--ref` | external entries | 40-hex SHA or `v<semver>`; external + empty = hard error (a pin never defaults off-fork) |
+| `--variant` | ✔ (apply/plan) | the install's slug — the matrix entry's name for this install; every install is the triple (addon, variant, tenant) |
 | `--instance` / `--workspace` | ✔ (exactly one) | the tenant; the other stays empty |
 | `--eks-cluster-name` / `--eks-cluster-role-arn` | k8s addons | contract vars for the provider wiring |
 | `--contract KEY=JSON` | no | extra contract variable, repeatable (`--contract billable=false`); loses to explicit manifest bindings (clause 10) |
@@ -51,8 +52,8 @@ never grant anything. Contract: [`namazu-cloud-instance` → `tenant-addons-plan
 ```json
 [
   { "addon": "NamazuStudios/namazu-cloud-addon-waf", "ref": "v1.2.0",
-    "instance": "acme-prod", "workspace": "" },
-  { "addon": "", "ref": "_fork_", "instance": "acme-prod", "workspace": "" }
+    "variant": "main", "instance": "acme-prod", "workspace": "" },
+  { "addon": "", "ref": "_fork_", "variant": "local", "instance": "acme-prod", "workspace": "" }
 ]
 ```
 
@@ -95,9 +96,9 @@ control plane can see installed addons without database tracking (design:
 namazu-conductor#109):
 
 ```
-addon.cloud.namazustudios.com/display-<id>     = manifest.yaml `display` (or the addon id)
-addon.cloud.namazustudios.com/version-<id>     = git short sha (or the pinned v<semver> tag)
-addon.cloud.namazustudios.com/description-<id> = manifest.yaml description, single-line
+addon.cloud.namazustudios.com/display-<id>_<variant>     = manifest.yaml `display` (or the addon id)
+addon.cloud.namazustudios.com/version-<id>_<variant>     = git short sha (or the pinned v<semver> tag)
+addon.cloud.namazustudios.com/description-<id>_<variant> = manifest.yaml description, single-line
 ```
 
 - **Mechanics:** one `kubectl annotate namespace <tenant> --overwrite ...`

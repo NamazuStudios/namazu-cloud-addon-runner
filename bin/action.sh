@@ -7,6 +7,7 @@ ACTION_PATH="${1:?action path missing}"
 python3 -m pip install --quiet --disable-pip-version-check 'PyYAML>=6' >/dev/null
 exec python3 "${ACTION_PATH}/src/addons_cli.py" \
   --mode "${INPUT_MODE:?}" \
+  --variant "${INPUT_VARIANT:-}" \
   --region "${INPUT_REGION:?}" \
   --bucket "${INPUT_BUCKET:?}" \
   --organization-id "${INPUT_ORGANIZATION_ID:?}" \

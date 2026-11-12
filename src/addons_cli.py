@@ -54,9 +54,11 @@ SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 TAG_RE = re.compile(r"^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
 ORG_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 VAR_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# addon_<id>_<variant>.tfstate: addon ids never contain '_' (slug grammar is
+# [a-z0-9-]), so the single underscore always splits id | variant.
 STATE_KEY_RE = re.compile(
     r"^tenants/(?P<kind>instances|sandboxes)/(?P<tenant>[^/]+)/"
-    r"addon_(?P<aid>[^/]+)\.tfstate$"
+    r"addon_(?P<aid>[^_/]+)_(?P<variant>[^/]+)\.tfstate$"
 )
 REF_RE = re.compile(r"^(?P<prefix>[$!])(?P<unit>instance|addon)\.(?P<rest>.+)$")
 
@@ -115,6 +117,18 @@ def validate_repo(repo: str, git_owner: str = GIT_OWNER_DEFAULT) -> Tuple[str, s
     return owner, addon_id
 
 
+def validate_variant(variant: Optional[str]) -> str:
+    """REQUIRED: every install is the triple (addon, variant, tenant). The
+    variant is the name WE specify in the matrix entry; no variant, no valid
+    entry (loud at prepare-index)."""
+    if not isinstance(variant, str) or len(variant) < 2 or not SLUG_RE.match(variant):
+        raise ContractError(
+            f"variant '{variant}' is REQUIRED and must match the slug grammar "
+            "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ (min length 2)"
+        )
+    return variant
+
+
 def validate_ref(ref: Optional[str]) -> Optional[str]:
     if ref in (None, ""):
         return None
@@ -163,19 +177,21 @@ def short_version(ref: str) -> str:
     return ref[:7] if SHA_RE.match(ref) else ref
 
 
-def addon_annotations(addon_id: str, manifest: Optional[Manifest], ref: str,
-                      remove: bool) -> List[str]:
-    """Annotation args for ONE addon on ONE tenant namespace. Removal uses
-    kubectl's trailing-dash syntax (`key-`); display/description never matter
-    there."""
+def addon_annotations(addon_id: str, variant: str, manifest: Optional[Manifest],
+                      ref: str, remove: bool) -> List[str]:
+    """Annotation args for ONE install (addon + variant) on ONE tenant
+    namespace — keys carry the variant so multiple instances of one addon on
+    one namespace never collide. Removal uses kubectl's trailing-dash syntax
+    (`key-`); display/description never matter there."""
     p = ANNOTATION_PREFIX
+    inst = f"{addon_id}_{variant}"
     if remove:
-        return [f"{p}display-{addon_id}-", f"{p}version-{addon_id}-",
-                f"{p}description-{addon_id}-"]
+        return [f"{p}display-{inst}-", f"{p}version-{inst}-",
+                f"{p}description-{inst}-"]
     return [
-        f"{p}display-{addon_id}={flat((manifest.display if manifest else None) or addon_id)}",
-        f"{p}version-{addon_id}={flat(short_version(ref))}",
-        f"{p}description-{addon_id}={flat(manifest.description if manifest else '')}",
+        f"{p}display-{inst}={flat((manifest.display if manifest else None) or addon_id)}",
+        f"{p}version-{inst}={flat(short_version(ref))}",
+        f"{p}description-{inst}={flat(manifest.description if manifest else '')}",
     ]
 
 
@@ -210,8 +226,8 @@ def _kubectl_cluster_flags(region: str, cluster: str, role_arn: str
              "--certificate-authority", ca_path], ca_path)
 
 
-def update_addon_annotations(args, addon_id: str, kind: str, tenant: str,
-                             ref: str, remove: bool,
+def update_addon_annotations(args, addon_id: str, variant: str, kind: str,
+                             tenant: str, ref: str, remove: bool,
                              manifest: Optional[Manifest] = None) -> None:
     """Stamp (apply) or remove (sweep destroy) ONE addon's namespace
     annotations on its tenant namespace. Best-effort by design: a failed
@@ -226,14 +242,15 @@ def update_addon_annotations(args, addon_id: str, kind: str, tenant: str,
         flags, ca_path = _kubectl_cluster_flags(args.region, cluster,
                                                 getattr(args, "eks_cluster_role_arn", "") or "")
         run(["kubectl", "annotate", "namespace", tenant, "--overwrite",
-             *addon_annotations(addon_id, manifest, ref, remove), *flags],
+             *addon_annotations(addon_id, variant, manifest, ref, remove), *flags],
             silent=True)
         log(f"namespace annotations {'removed from' if remove else 'stamped on'} "
-            f"{tenant} ({kind}): addon '{addon_id}'")
+            f"{tenant} ({kind}): addon '{addon_id}' variant '{variant}'")
     except ExternalError as err:
         loud(f"namespace annotation {'removal' if remove else 'stamp'} failed for "
-             f"{tenant} ({kind}), addon '{addon_id}' — the terraform outcome stands; "
-             f"control-plane visibility for this addon may be stale: {err}")
+             f"{tenant} ({kind}), addon '{addon_id}' variant '{variant}' — the "
+             f"terraform outcome stands; control-plane visibility for this "
+             f"addon may be stale: {err}")
     finally:
         if ca_path:
             try:
@@ -480,10 +497,13 @@ def _split_ref(raw: str) -> Optional[Tuple[bool, str, Tuple[str, ...]]]:
         return None
     bang, unit, rest = m["prefix"] == "!", m["unit"], m["rest"]
     if unit == "addon":
-        if "." not in rest:
+        seg = rest.split(".")
+        # $addon.<id>.<variant>.<output>... — variant REQUIRED (entries always
+        # carry one, so the parse is always unambiguous)
+        if len(seg) < 3 or not seg[0] or not seg[1]:
             return bang, unit, (rest,)
-        aid, out_path = rest.split(".", 1)
-        parts = (aid, *[p for p in out_path.split(".") if p != ""])
+        aid, variant, out_path = seg[0], seg[1], ".".join(seg[2:])
+        parts = (aid, variant, *[p for p in out_path.split(".") if p != ""])
         return bang, unit, parts
     return bang, unit, tuple(p for p in rest.split(".") if p != "")
 
@@ -499,20 +519,23 @@ def resolve_binding(raw: Any, menus: Dict[str, OutputMenu], where: str
     if split is None:
         return raw, False  # literal (incl. stray `$`/`!` prefixes)
     bang, unit, parts = split
-    if unit == "addon" and (len(parts) < 2 or not parts[0]):
+    if unit == "addon" and (len(parts) < 3 or not parts[0] or not parts[1]):
         raise ContractError(
-            f"{where}: '{raw}' must reference $addon.<addon_id>.<output>"
+            f"{where}: '{raw}' must reference "
+            "$addon.<addon_id>.<variant>.<output> — the variant names WHICH "
+            "install of that addon on this tenant"
         )
-    menu_key = "instance" if unit == "instance" else parts[0]
+    menu_key = "instance" if unit == "instance" else f"{parts[0]}_{parts[1]}"
     menu = menus.get(menu_key)
     if menu is None:
         raise ContractError(
-            f"{where}: reference '{raw}' names addon '{menu_key}', whose "
-            "statefile is not available on this tenant — install it first "
-            "(loud failure by contract clause 4; the error names the ref "
-            "and owner), or correct the binding"
+            f"{where}: reference '{raw}' names the variant install "
+            f"'{menu_key}', whose statefile is not available on this tenant — "
+            "install that (addon, variant) first (loud failure by contract "
+            "clause 4; the error names the ref and owner), or correct the "
+            "binding"
         )
-    path = parts[1:] if unit == "addon" else parts
+    path = parts[2:] if unit == "addon" else parts
     if not path or not path[0]:
         raise ContractError(f"{where}: '{raw}' must name an output")
     out = path[0]
@@ -604,6 +627,7 @@ def write_sensitive_env(env: Dict[str, str]) -> None:
 
 
 def mode_apply_or_plan(args) -> None:
+    variant = validate_variant(args.variant)
     kind, tenant = tenant_of(args.instance, args.workspace)
     prefix = tenant_prefix(kind, tenant)
     baseline_key = prefix + "terraform.tfstate"
@@ -640,9 +664,9 @@ def mode_apply_or_plan(args) -> None:
             )
         log(f"repo-less entry: applying this fork's local root (id={addon_id})")
 
-    state_key = prefix + f"addon_{addon_id}.tfstate"
-    log(f"bijection: {args.repo or '<fork-local>'} → addon_id={addon_id} → "
-        f"state key {state_key}")
+    state_key = prefix + f"addon_{addon_id}_{variant}.tfstate"
+    log(f"bijection: {args.repo or '<fork-local>'} → addon_id={addon_id} "
+        f"variant={variant} → state key {state_key}")
 
     manifest = load_manifest(os.path.join(root, "manifest.yaml"),
                              args.organization_id)
@@ -654,20 +678,22 @@ def mode_apply_or_plan(args) -> None:
         if get_object(args.bucket, baseline_key, baseline_path):
             menus["instance"] = OutputMenu.from_statefile(baseline_path)
 
-        # foreign addons referenced by this manifest
+        # foreign addon installs referenced by this manifest — keyed AND
+        # fetched per (id, variant)
         for var, raw in manifest.input.items():
             split = _split_ref(raw) if isinstance(raw, str) else None
             if split and split[1] == "addon":
-                foreign_id = split[2][0]
-                if not menus.get(foreign_id):
-                    foreign_path = os.path.join(tmp, f"{foreign_id}.tfstate")
-                    if get_object(args.bucket, prefix + f"addon_{foreign_id}.tfstate",
+                foreign_id, foreign_variant = split[2][0], split[2][1]
+                menu_key = f"{foreign_id}_{foreign_variant}"
+                if not menus.get(menu_key):
+                    foreign_path = os.path.join(
+                        tmp, f"{foreign_id}_{foreign_variant}.tfstate")
+                    if get_object(args.bucket,
+                                  prefix + f"addon_{foreign_id}_{foreign_variant}.tfstate",
                                   foreign_path):
-                        menus[foreign_id] = OutputMenu.from_statefile(foreign_path)
-                    else:
-                        # keep the loud failure inside resolve_binding; register
-                        # an empty menu so the error names ref + owner repo
-                        menus[foreign_id] = OutputMenu(values={})
+                        menus[menu_key] = OutputMenu.from_statefile(foreign_path)
+                    # else: leave the menu ABSENT — resolve_binding then raises
+                    # the loud install-first error naming ref + (id, variant)
 
     tfvars, sensitive_env = prepare_bindings(menus, manifest, contract_vars(args))
     tfvars_path = emit_tfvars(os.path.join(root, "."), tfvars)
@@ -687,7 +713,7 @@ def mode_apply_or_plan(args) -> None:
     log(f"✓ mode={args.mode} finished: addon={addon_id} tenant={tenant} "
         f"(kind={kind}) ref={ref_log}")
     if args.mode == "apply":
-        update_addon_annotations(args, addon_id, kind, tenant, ref_log,
+        update_addon_annotations(args, addon_id, variant, kind, tenant, ref_log,
                                  remove=False, manifest=manifest)
 
 
@@ -727,6 +753,8 @@ def repo_dirname(repo: str) -> str:
 
 
 def mode_sweep(args) -> None:
+    # coerce here too (main() coerces, but call sites/tests may not)
+    args.tidy = str(getattr(args, "tidy", "false")).lower() in ("1", "true", "yes")
     if not args.index_file:
         raise ContractError("mode=sweep requires --index-file (addons.index.json "
                             "— the materialized workflow entries from this fork)")
@@ -736,49 +764,51 @@ def mode_sweep(args) -> None:
         raise ContractError("addons.index.json must be a list of entries "
                             "{addon, ref, instance, workspace}")
 
-    # entries: (addon_id) -> {repo, ref}; pairs: (addon_id, kind, tenant) -> ref
-    known: Dict[str, Dict[str, str]] = {}
-    pairs: Dict[Tuple[str, str, str], str] = {}
+    # entries: (addon_id, variant) -> {repo, ref};
+    # pairs: (addon_id, variant, kind, tenant) -> ref
+    known: Dict[Tuple[str, str], Dict[str, str]] = {}
+    pairs: Dict[Tuple[str, str, str, str], str] = {}
     gh_repo = os.environ.get("GITHUB_REPOSITORY") or ""
     for entry in index:
         repo = entry.get("addon") or gh_repo
         owner, aid = validate_repo(repo)
         ref = entry.get("ref") or ""
+        variant = validate_variant(entry.get("variant"))
         kind, tenant = tenant_of(entry.get("instance"), entry.get("workspace"))
-        known[aid] = {"repo": repo, "ref": ref}
-        pairs[(aid, kind, tenant)] = ref
-    log(f"index: {len(known)} addon id(s), {len(pairs)} install entries")
+        known[(aid, variant)] = {"repo": repo, "ref": ref}
+        pairs[(aid, variant, kind, tenant)] = ref
+    log(f"index: {len(known)} (addon, variant) id(s), {len(pairs)} install entries")
 
-    destroyable: List[Tuple[str, str, str, str]] = []  # (aid, kind, tenant, key)
+    destroyable: List[Tuple[str, str, str, str, str]] = []  # (aid, variant, kind, tenant, key)
     for key in list_state_keys(args.bucket):
         m = STATE_KEY_RE.match(key)
         if not m:
             continue
-        aid = m["aid"]
-        if aid not in known and aid != gh_suffix():
-            continue  # never touch ids our workflows never named
+        aid, variant = m["aid"], m["variant"]
+        if aid not in {a for (a, _) in known} and aid != gh_suffix():
+            continue  # never touch addon ids our workflows never named
         cls = ("instances", m["tenant"]) if m["kind"] == "instances" else \
               ("sandboxes", m["tenant"])
         baseline_key = f"tenants/{m['kind']}/{m['tenant']}/terraform.tfstate"
         baseline_gone = not key_exists(args.bucket, baseline_key)
-        pair_present = (aid, *cls) in pairs
+        pair_present = (aid, variant, *cls) in pairs
         if baseline_gone:
             log(f"orphan: {key} — tenant {m['tenant']} is gone")
-            destroyable.append((aid, m["kind"], m["tenant"], key))
+            destroyable.append((aid, variant, m["kind"], m["tenant"], key))
         elif not pair_present:
-            log(f"orphan: {key} — no workflow entry names addon '{aid}' on "
-                f"tenant {m['tenant']} anymore")
-            destroyable.append((aid, m["kind"], m["tenant"], key))
+            log(f"orphan: {key} — no workflow entry names addon '{aid}' "
+                f"variant '{variant}' on tenant {m['tenant']} anymore")
+            destroyable.append((aid, variant, m["kind"], m["tenant"], key))
 
     if not destroyable:
         log("sweep: nothing to destroy — converged")
         return
 
     failures = 0
-    for aid, kind, tenant, key in destroyable:
+    for aid, variant, kind, tenant, key in destroyable:
         try:
-            destroy_one(args, aid, known.get(aid, {}), kind, tenant, key)
-            update_addon_annotations(args, aid, kind, tenant, "", remove=True)
+            destroy_one(args, aid, variant, known.get((aid, variant), {}), kind, tenant, key)
+            update_addon_annotations(args, aid, variant, kind, tenant, "", remove=True)
             if args.tidy:
                 delete_key(args.bucket, key)
         except (ContractError, ExternalError) as err:
@@ -804,8 +834,8 @@ def gh_suffix() -> str:
     return "__fork__"
 
 
-def destroy_one(args, aid: str, meta: Dict[str, str], kind: str, tenant: str,
-                key: str) -> None:
+def destroy_one(args, aid: str, variant: str, meta: Dict[str, str], kind: str,
+                tenant: str, key: str) -> None:
     state_key = key
     root = args.caller_root
     gh_repo = os.environ.get("GITHUB_REPOSITORY") or ""
@@ -854,11 +884,11 @@ def mode_audit(args) -> None:
     for key in list_state_keys(args.bucket):
         m = STATE_KEY_RE.match(key)
         if m:
-            rows.append((m["aid"], m["kind"], m["tenant"], key))
+            rows.append((m["aid"], m["variant"], m["kind"], m["tenant"], key))
     rows.sort()
     log(f"inventory: {len(rows)} addon statefile(s)")
-    for aid, kind, tenant, key in rows:
-        print(f"  {aid:34} {kind:9} {tenant:20} {key}")
+    for aid, variant, kind, tenant, key in rows:
+        print(f"  {aid:26} {variant:12} {kind:9} {tenant:20} {key}")
     print("[addon-runner] audit is read-only (per contract clause 8)")
 
 
@@ -874,6 +904,9 @@ def parse_args(argv=None):
     p.add_argument("--region", required=True)
     p.add_argument("--bucket", required=True)
     p.add_argument("--organization-id", required=True)
+    p.add_argument("--variant", default="",
+                   help="REQUIRED for apply/plan: the install's variant slug "
+                        "(the matrix entry's name for this install)")
     p.add_argument("--repo", default="")
     p.add_argument("--ref", default="")
     p.add_argument("--instance", default="")
