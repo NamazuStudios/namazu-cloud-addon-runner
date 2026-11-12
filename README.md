@@ -150,3 +150,13 @@ expected to come back to us, **no exceptions** — AGPL-3.0's network
 copyleft applies to anything offering this as a service, and we ask that
 improvements be contributed upstream to `NamazuStudios`, where they are
 reviewed and merged through the normal PR process.
+
+## AGPL waiver for delivered work
+
+Namazu Studios, as the copyright holder, **waives all AGPL obligations for
+software installed through a purchase or other business arrangement
+between Namazu Studios and the client.** The AGPL terms above govern the
+code as published in this repository; work delivered to you under
+contract — including any official addon activated for a fee or custom
+addon authored for you — is delivered under that agreement, not under the
+license's reciprocity terms.
