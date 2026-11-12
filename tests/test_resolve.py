@@ -26,8 +26,8 @@ def test_instance_ref_resolves(tmp_path):
 
 
 def test_addon_ref_resolves(tmp_path):
-    menus = {"instance": MENU, "waf": MENU}
-    v, _ = resolve_binding("$addon.waf.waf_out", menus, "x")
+    menus = {"instance": MENU, "waf_g5": MENU}
+    v, _ = resolve_binding("$addon.waf.g5.waf_out", menus, "x")
     assert v == {"rules": ["r1", "r2"]}  # structured values wire wholesale
 
 
@@ -39,7 +39,7 @@ def test_traversal_must_end_at_leaf():
 
 def test_missing_menu_is_a_loud_named_failure():
     with pytest.raises(ContractError, match="install"):
-        resolve_binding("$addon.waf.waf_out", {}, "x")
+        resolve_binding("$addon.waf.g5.waf_out", {}, "x")
 
 
 def test_sensitive_gate():

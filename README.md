@@ -11,19 +11,21 @@ never grant anything. Contract: [`namazu-cloud-instance` → `tenant-addons-plan
 |---|---|
 | Naming grammar | repo must be `NamazuStudios/namazu-cloud-addon-<id>`, `<id>` DNS-1123-ish; `<id>` becomes the addon id via the bijection |
 | Ref grammar | full 40-hex SHA **or** protected `v<MAJOR>.<MINOR>.<PATCH>` tag; branches (incl. `main`) always rejected |
-| Bijection | statefile = `addon_<id>.tfstate` under the tenant prefix; backend key per invocation |
+| Bijection | statefile = `addon_<id>_<variant>.tfstate` under the tenant prefix (variant REQUIRED from the entry — ids never contain `_`, so the first underscore always splits id \| variant); backend key per invocation |
 | Tenant existence | baseline `terraform.tfstate` presence decides skip/apply (clause 9) |
-| References | `$instance.<out>[.<key>…]` / `$addon.<id>.<out>…` resolved from statefiles; missing ⇒ loud failure naming ref + owner |
+| References | `$instance.<out>[.<key>…]` / `$addon.<id>.<variant>.<out>…` resolved from statefiles; missing ⇒ loud failure naming ref + owner |
 | Sensitivity gate | `$` on a sensitive output = hard error; `!` = acknowledged override, value rides `TF_VAR_*` env only (never on disk, never logged) |
 | Visibility | private addons consumable only by the fork whose `organization_id` = `owner_org` |
 | Sweep | destroy-from-state: provider shell + statefile suffice; no resource configs needed |
 
 ## Modes
 
-- `apply` / `plan` — one addon × one tenant. Input contract:
-  `mode, region, bucket, instance|workspace, organization_id` +
+- `apply` / `plan` — one (addon, variant) × one tenant. Input contract:
+  `mode, variant (REQUIRED), region, bucket, instance|workspace, organization_id` +
   (`repo`, `ref` for foreign addons; omitted ⇒ the fork's own local root) +
-  optional `eks_cluster_name`, `eks_cluster_role_arn`, `index_file`, `tidy`.
+  optional `eks_cluster_name`, `eks_cluster_role_arn`, `index_file`, `tidy`,
+  `contract` (KEY=JSON pairs → `--contract`; the addon-config channel once
+  baselines stop exporting addon outputs — see namazu-cloud-instance#130).
 - `sweep` — needs `index_file` (`addons.index.json`, the materialized
   workflow entries). Enumerates `tenants/*/*/addon_<id>.tfstate` from the
   bucket listing and destroys: vanished tenants, entries no longer named.
@@ -38,9 +40,10 @@ never grant anything. Contract: [`namazu-cloud-instance` → `tenant-addons-plan
 | `--organization-id` | ✔ | the org's **database unique id**; feeds audit tags + private (`owner_org`) enforcement |
 | `--repo` | apply/plan | `owner/name`; omitted ⇒ repo-less entry = the fork's own local root (id derived from `GITHUB_REPOSITORY`) |
 | `--ref` | external entries | 40-hex SHA or `v<semver>`; external + empty = hard error (a pin never defaults off-fork) |
+| `--variant` | ✔ (apply/plan) | the install's slug — the matrix entry's name for this install; every install is the triple (addon, variant, tenant) |
 | `--instance` / `--workspace` | ✔ (exactly one) | the tenant; the other stays empty |
 | `--eks-cluster-name` / `--eks-cluster-role-arn` | k8s addons | contract vars for the provider wiring |
-| `--contract KEY=JSON` | no | extra contract variable, repeatable (`--contract billable=false`); loses to explicit manifest bindings (clause 10) |
+| `--contract KEY=JSON` | no | extra contract variable, repeatable (`--contract billable=false`); loses to explicit manifest bindings (clause 10). Exposed by `action.yml` as the `contract` input: one `KEY=JSON` pair per line, blank lines skipped |
 | `--index-file` | sweep | `addons.index.json`, see schema below |
 | `--tidy` | sweep | after a successful destroy, `s3 rm` the emptied state key (+ `.tflock`) |
 | `--work-dir` | no | scratch space for foreign checkouts (default `.addons-work`) |
@@ -51,8 +54,8 @@ never grant anything. Contract: [`namazu-cloud-instance` → `tenant-addons-plan
 ```json
 [
   { "addon": "NamazuStudios/namazu-cloud-addon-waf", "ref": "v1.2.0",
-    "instance": "acme-prod", "workspace": "" },
-  { "addon": "", "ref": "_fork_", "instance": "acme-prod", "workspace": "" }
+    "variant": "main", "instance": "acme-prod", "workspace": "" },
+  { "addon": "", "ref": "_fork_", "variant": "local", "instance": "acme-prod", "workspace": "" }
 ]
 ```
 
@@ -86,6 +89,33 @@ Environment: AWS credentials in env (OIDC/job role), optional
 `ELEMENTS_GIT_TOKEN` for private addon clones, `TF_PLUGIN_CACHE_DIR` for
 fast repeated inits, `ELEMENTS_ADDON_GIT_OWNER` to override the family
 namespace (default `NamazuStudios`).
+
+## Namespace annotations (visibility seam)
+
+After a successful `apply`, the runner stamps the tenant namespace so the
+control plane can see installed addons without database tracking (design:
+"Namespace Tagging"; consumed by the Conductor per-scope read-out,
+namazu-conductor#109):
+
+```
+addon.cloud.namazustudios.com/display-<id>_<variant>     = manifest.yaml `display` (or the addon id)
+addon.cloud.namazustudios.com/version-<id>_<variant>     = git short sha (or the pinned v<semver> tag)
+addon.cloud.namazustudios.com/description-<id>_<variant> = manifest.yaml description, single-line
+```
+
+- **Mechanics:** one `kubectl annotate namespace <tenant> --overwrite ...`
+  per addon, authed one-off with the real cluster endpoint + CA + a
+  cloud-issued token (`aws eks describe-cluster` + `aws eks get-token`;
+  with `eks_cluster_role_arn` the mint self-assumes the executor role —
+  the bootstrap trust allows role -> itself).
+- **On sweep destroy** the three keys are removed (`key-` syntax) so a
+  gone addon stops claiming visibility.
+- **Manifest field:** `display` is optional in manifest.yaml; omit it to
+  fall back to the addon id.
+- **Best-effort by design:** a failed annotate NEVER undoes a successful
+  apply/destroy — it warns loudly (visibility may go stale) and the job's
+  outcome stands. Skips entirely when the invocation has no
+  `eks_cluster_name` wiring.
 
 ## Trust model
 
