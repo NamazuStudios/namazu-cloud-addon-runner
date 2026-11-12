@@ -87,6 +87,33 @@ Environment: AWS credentials in env (OIDC/job role), optional
 fast repeated inits, `ELEMENTS_ADDON_GIT_OWNER` to override the family
 namespace (default `NamazuStudios`).
 
+## Namespace annotations (visibility seam)
+
+After a successful `apply`, the runner stamps the tenant namespace so the
+control plane can see installed addons without database tracking (design:
+"Namespace Tagging"; consumed by the Conductor per-scope read-out,
+namazu-conductor#109):
+
+```
+addon.cloud.namazustudios.com/display-<id>     = manifest.yaml `display` (or the addon id)
+addon.cloud.namazustudios.com/version-<id>     = git short sha (or the pinned v<semver> tag)
+addon.cloud.namazustudios.com/description-<id> = manifest.yaml description, single-line
+```
+
+- **Mechanics:** one `kubectl annotate namespace <tenant> --overwrite ...`
+  per addon, authed one-off with the real cluster endpoint + CA + a
+  cloud-issued token (`aws eks describe-cluster` + `aws eks get-token`;
+  with `eks_cluster_role_arn` the mint self-assumes the executor role —
+  the bootstrap trust allows role -> itself).
+- **On sweep destroy** the three keys are removed (`key-` syntax) so a
+  gone addon stops claiming visibility.
+- **Manifest field:** `display` is optional in manifest.yaml; omit it to
+  fall back to the addon id.
+- **Best-effort by design:** a failed annotate NEVER undoes a successful
+  apply/destroy — it warns loudly (visibility may go stale) and the job's
+  outcome stands. Skips entirely when the invocation has no
+  `eks_cluster_name` wiring.
+
 ## Trust model
 
 - The action NEVER assumes a role itself; run

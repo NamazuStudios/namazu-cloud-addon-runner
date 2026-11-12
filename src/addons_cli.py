@@ -30,6 +30,7 @@ Contract implemented here (see namazu-cloud-instance/tenant-addons-plan.md):
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import re
@@ -58,6 +59,11 @@ STATE_KEY_RE = re.compile(
     r"addon_(?P<aid>[^/]+)\.tfstate$"
 )
 REF_RE = re.compile(r"^(?P<prefix>[$!])(?P<unit>instance|addon)\.(?P<rest>.+)$")
+
+# Namespace annotation scheme (design: "Namespace Tagging") — the visibility
+# seam between org-fork CI and the control plane. The conductor's per-scope
+# read-out (namazu-conductor#109) surfaces these keys.
+ANNOTATION_PREFIX = "addon.cloud.namazustudios.com/"
 
 
 class ContractError(Exception):
@@ -140,6 +146,100 @@ def tenant_of(instance: Optional[str], workspace: Optional[str]) -> Tuple[str, s
 
 def tenant_prefix(kind: str, tenant: str) -> str:
     return f"tenants/{kind}/{tenant}/"
+
+
+# --------------------------------------------------------------------------- #
+# namespace annotations — the visibility seam (design: "Namespace Tagging")
+# --------------------------------------------------------------------------- #
+
+
+def flat(value: Any) -> str:
+    """Single-line, quote-free annotation value (kubectl-annotate safe)."""
+    return " ".join(str(value).split()).replace('"', "").replace("'", "")
+
+
+def short_version(ref: str) -> str:
+    """40-hex SHA -> short sha; a v<semver> tag rides as-is."""
+    return ref[:7] if SHA_RE.match(ref) else ref
+
+
+def addon_annotations(addon_id: str, manifest: Optional[Manifest], ref: str,
+                      remove: bool) -> List[str]:
+    """Annotation args for ONE addon on ONE tenant namespace. Removal uses
+    kubectl's trailing-dash syntax (`key-`); display/description never matter
+    there."""
+    p = ANNOTATION_PREFIX
+    if remove:
+        return [f"{p}display-{addon_id}-", f"{p}version-{addon_id}-",
+                f"{p}description-{addon_id}-"]
+    return [
+        f"{p}display-{addon_id}={flat((manifest.display if manifest else None) or addon_id)}",
+        f"{p}version-{addon_id}={flat(short_version(ref))}",
+        f"{p}description-{addon_id}={flat(manifest.description if manifest else '')}",
+    ]
+
+
+def _kubectl_cluster_flags(region: str, cluster: str, role_arn: str
+                           ) -> Tuple[List[str], str]:
+    """One-off kubectl auth flags against the tenant cluster: real endpoint +
+    CA + a cloud-issued token. The token rides argv for the duration of the
+    single call only; the CA file is public cert material and unlinked by the
+    caller. With a role_arn the token mint self-assumes the executor role
+    (the bootstrap trust allows role -> itself); without one it uses the
+    ambient identity, which IS the executor role in CI."""
+    info = json.loads(aws(["eks", "describe-cluster", "--name", cluster,
+                           "--region", region, "--output", "json"],
+                          silent=True).stdout or "{}").get("cluster") or {}
+    if not info.get("endpoint") or not (info.get("certificateAuthority") or {}).get("data"):
+        raise ExternalError(
+            f"eks describe-cluster for '{cluster}' returned no endpoint/CA — "
+            "cannot wire kubectl for namespace annotations")
+    token_doc = json.loads(aws(["eks", "get-token", "--cluster-name", cluster,
+                                "--region", region]
+                               + (["--role-arn", role_arn] if role_arn else []),
+                               silent=True).stdout or "{}")
+    token = (token_doc.get("status") or {}).get("token")
+    if not token:
+        raise ExternalError(
+            f"aws eks get-token returned no token for cluster '{cluster}' "
+            "(ambient identity or role-arn lacks eks access)")
+    with tempfile.NamedTemporaryFile("w", suffix=".pem", delete=False) as fh:
+        fh.write(base64.b64decode(info["certificateAuthority"]["data"]).decode())
+        ca_path = fh.name
+    return (["--server", info["endpoint"], "--token", token,
+             "--certificate-authority", ca_path], ca_path)
+
+
+def update_addon_annotations(args, addon_id: str, kind: str, tenant: str,
+                             ref: str, remove: bool,
+                             manifest: Optional[Manifest] = None) -> None:
+    """Stamp (apply) or remove (sweep destroy) ONE addon's namespace
+    annotations on its tenant namespace. Best-effort by design: a failed
+    annotate never undoes a successful terraform apply/destroy — it warns
+    loudly (visibility may go stale) and moves on. Skips entirely when the
+    invocation carries no EKS cluster wiring."""
+    cluster = getattr(args, "eks_cluster_name", "") or ""
+    if not cluster:
+        return
+    ca_path = None
+    try:
+        flags, ca_path = _kubectl_cluster_flags(args.region, cluster,
+                                                getattr(args, "eks_cluster_role_arn", "") or "")
+        run(["kubectl", "annotate", "namespace", tenant, "--overwrite",
+             *addon_annotations(addon_id, manifest, ref, remove), *flags],
+            silent=True)
+        log(f"namespace annotations {'removed from' if remove else 'stamped on'} "
+            f"{tenant} ({kind}): addon '{addon_id}'")
+    except ExternalError as err:
+        loud(f"namespace annotation {'removal' if remove else 'stamp'} failed for "
+             f"{tenant} ({kind}), addon '{addon_id}' — the terraform outcome stands; "
+             f"control-plane visibility for this addon may be stale: {err}")
+    finally:
+        if ca_path:
+            try:
+                os.remove(ca_path)
+            except OSError:
+                pass
 
 
 # --------------------------------------------------------------------------- #
@@ -253,6 +353,7 @@ class Manifest:
     owner_org: Optional[str]
     input: Dict[str, Any]
     path: str
+    display: Optional[str] = None
 
 
 def load_manifest(path: str, organization_id: Optional[str]) -> Manifest:
@@ -280,6 +381,12 @@ def load_manifest(path: str, organization_id: Optional[str]) -> Manifest:
             f"manifest 'visibility' must be 'shared' or 'private' (got {visibility!r})"
         )
     owner_org = doc.get("owner_org")
+    display = doc.get("display")
+    if display is not None:
+        if not isinstance(display, str) or not display.strip():
+            raise ContractError("manifest 'display' must be a non-empty string "
+                                "(the human-readable addon name; omit to use the addon id)")
+        display = display.strip()
     inp = doc.get("input") or {}
     if not isinstance(inp, dict):
         raise ContractError("manifest 'input' must be a mapping "
@@ -302,7 +409,7 @@ def load_manifest(path: str, organization_id: Optional[str]) -> Manifest:
                 "(the fork's validate-lint should have failed its PR first)"
             )
     m = Manifest(description=description.strip(), visibility=visibility,
-                 owner_org=owner_org, input=inp, path=path)
+                 owner_org=owner_org, input=inp, path=path, display=display)
     log(f"manifest: '{m.description}' visibility={m.visibility}")
     return m
 
@@ -579,6 +686,9 @@ def mode_apply_or_plan(args) -> None:
             pass
     log(f"✓ mode={args.mode} finished: addon={addon_id} tenant={tenant} "
         f"(kind={kind}) ref={ref_log}")
+    if args.mode == "apply":
+        update_addon_annotations(args, addon_id, kind, tenant, ref_log,
+                                 remove=False, manifest=manifest)
 
 
 def contract_vars(args) -> Dict[str, Any]:
@@ -668,6 +778,7 @@ def mode_sweep(args) -> None:
     for aid, kind, tenant, key in destroyable:
         try:
             destroy_one(args, aid, known.get(aid, {}), kind, tenant, key)
+            update_addon_annotations(args, aid, kind, tenant, "", remove=True)
             if args.tidy:
                 delete_key(args.bucket, key)
         except (ContractError, ExternalError) as err:

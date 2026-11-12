@@ -252,3 +252,159 @@ def test_exit_code_3_on_external_error(monkeypatch):
                             addons_cli.ExternalError("boom")))
     assert addons_cli.main(["--mode", "audit", "--region", "r",
                             "--bucket", "bkt", "--organization-id", "org"]) == 3
+
+
+# ----------------------------------------------------- namespace annotations --
+
+def _manifest_with_display():
+    return addons_cli.Manifest(description="Opt-in GPU node capacity",
+                               visibility="shared", owner_org=None,
+                               input={}, path="manifest.yaml",
+                               display="GPU Node Capacity")
+
+
+def test_flat_collapses_whitespace_and_strips_quotes():
+    assert addons_cli.flat("a\n  b\tc") == "a b c"
+    assert addons_cli.flat('"quoted\' value"') == "quoted value"
+
+
+def test_short_version_sha_vs_tag():
+    assert addons_cli.short_version("a" * 40) == "a" * 7
+    assert addons_cli.short_version("v1.2.3") == "v1.2.3"
+
+
+def test_addon_annotations_set_and_remove():
+    m = _manifest_with_display()
+    got = addons_cli.addon_annotations("gpu", m, "b" * 40, remove=False)
+    p = addons_cli.ANNOTATION_PREFIX
+    assert got == [
+        f"{p}display-gpu=GPU Node Capacity",
+        f"{p}version-gpu={'b' * 7}",
+        f"{p}description-gpu=Opt-in GPU node capacity",
+    ]
+    gone = addons_cli.addon_annotations("gpu", m, "b" * 40, remove=True)
+    assert gone == [f"{p}display-gpu-", f"{p}version-gpu-", f"{p}description-gpu-"]
+
+
+def test_addon_annotations_display_falls_back_to_addon_id():
+    m = addons_cli.Manifest(description="d", visibility="shared", owner_org=None,
+                            input={}, path="m.yaml", display=None)
+    got = addons_cli.addon_annotations("waf", m, "c" * 40, remove=False)
+    assert got[0] == f"{addons_cli.ANNOTATION_PREFIX}display-waf=waf"
+
+
+def test_manifest_display_is_validated():
+    import tempfile as tf
+    import os
+    with tf.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "manifest.yaml")
+        open(path, "w").write("description: d\ndisplay: \"   \"\n")
+        with pytest.raises(addons_cli.ContractError, match="display"):
+            addons_cli.load_manifest(path, "org")
+
+
+def test_apply_stamps_annotations_with_cluster_wiring(monkeypatch, tmp_path):
+    """End-to-end apply with EKS wiring: the annotate call must carry the
+    stamped keys against the tenant namespace."""
+    calls = stub_cli(monkeypatch, None)
+    calls["objects"]["tenants/instances/inst-1/terraform.tfstate"] = write_state(
+        "tenants/instances/inst-1/terraform.tfstate", {})
+
+    def fake_aws(args, *, silent=False):
+        if args[:2] == ["eks", "describe-cluster"]:
+            payload = {"cluster": {"endpoint": "https://eks.example",
+                                   "certificateAuthority": {"data": "Y2VydA=="}}}
+        elif args[:2] == ["eks", "get-token"]:
+            payload = {"status": {"token": "tok"}}
+        else:
+            payload = {}
+        return CompletedProcess(args, 0, stdout=json.dumps(payload), stderr="")
+
+    monkeypatch.setattr(addons_cli, "aws", fake_aws)
+    kubectl = []
+    real_run = addons_cli.run
+    def kubectl_recording_run(cmd, *, silent=False):
+        if cmd[0] == "kubectl":
+            kubectl.append(cmd)
+            return CompletedProcess(cmd, 0, stdout="", stderr="")
+        return real_run(cmd, silent=silent)
+    monkeypatch.setattr(addons_cli, "run", kubectl_recording_run)
+
+    repo = "NamazuStudios/namazu-cloud-addon-gpu"
+    root = tmp_path / addons_cli.repo_dirname(repo)
+    root.mkdir()
+    put_addon(str(root), """
+description: Opt-in GPU node capacity
+visibility: shared
+display: GPU Node Capacity
+input: {}
+""")
+    args = make_args(mode="apply", repo=repo, ref="d" * 40, instance="inst-1",
+                     work_dir=str(tmp_path), eks_cluster_name="tenants-eks",
+                     eks_cluster_role_arn="arn:aws:iam::1:role/exec")
+    monkeypatch.setattr(addons_cli, "repo_dirname", lambda _r: root.name)
+    addons_cli.mode_apply_or_plan(args)
+
+    assert len(kubectl) == 1
+    cmd = kubectl[0]
+    assert cmd[:4] == ["kubectl", "annotate", "namespace", "inst-1"]
+    assert "--overwrite" in cmd
+    assert f"{addons_cli.ANNOTATION_PREFIX}display-gpu=GPU Node Capacity" in cmd
+    assert f"{addons_cli.ANNOTATION_PREFIX}version-gpu={'d' * 7}" in cmd
+    assert f"{addons_cli.ANNOTATION_PREFIX}description-gpu=Opt-in GPU node capacity" in cmd
+    # the CA temp file is unlinked after the call
+    import glob as g
+    assert not g.glob(str(tmp_path / "**/*.pem"), recursive=True)
+
+
+def test_apply_annotation_failure_is_non_fatal(monkeypatch, tmp_path):
+    """A broken cluster wiring must NOT undo a successful apply: loud warn, exit 0."""
+    calls = stub_cli(monkeypatch, None)
+    calls["objects"]["tenants/instances/inst-1/terraform.tfstate"] = write_state(
+        "tenants/instances/inst-1/terraform.tfstate", {})
+    repo = "NamazuStudios/namazu-cloud-addon-gpu"
+    root = tmp_path / addons_cli.repo_dirname(repo)
+    root.mkdir()
+    put_addon(str(root), "description: d\nvisibility: shared\ninput: {}\n")
+    args = make_args(mode="apply", repo=repo, ref="e" * 40, instance="inst-1",
+                     work_dir=str(tmp_path), eks_cluster_name="tenants-eks")
+    monkeypatch.setattr(addons_cli, "repo_dirname", lambda _r: root.name)
+    # default stub aws returns empty stdout -> json parse fails -> ExternalError
+    addons_cli.mode_apply_or_plan(args)  # must not raise
+    assert calls["run"]  # terraform still ran
+
+
+def test_apply_without_cluster_wiring_skips_annotations(monkeypatch, tmp_path):
+    calls = stub_cli(monkeypatch, None)
+    calls["objects"]["tenants/instances/inst-1/terraform.tfstate"] = write_state(
+        "tenants/instances/inst-1/terraform.tfstate", {})
+    repo = "NamazuStudios/namazu-cloud-addon-waf"
+    root = tmp_path / addons_cli.repo_dirname(repo)
+    root.mkdir()
+    put_addon(str(root), "description: d\nvisibility: shared\ninput: {}\n")
+    args = make_args(mode="apply", repo=repo, ref="f" * 40, instance="inst-1",
+                     work_dir=str(tmp_path))  # no eks_cluster_name
+    monkeypatch.setattr(addons_cli, "repo_dirname", lambda _r: root.name)
+    # no cluster wiring -> the annotate path must never be entered
+    def forbidden_flags(*a, **k):
+        raise AssertionError("kubectl path entered without eks_cluster_name")
+    monkeypatch.setattr(addons_cli, "_kubectl_cluster_flags", forbidden_flags)
+    addons_cli.mode_apply_or_plan(args)
+
+
+def test_sweep_removes_annotations_after_destroy(monkeypatch, tmp_path):
+    calls = stub_cli(monkeypatch, None)
+    key = "tenants/instances/gone/addon_waf.tfstate"
+    calls["objects"][key] = {}
+    index = tmp_path / "addons.index.json"
+    index.write_text(json.dumps(
+        [{"addon": "NamazuStudios/namazu-cloud-addon-waf", "ref": "a" * 40,
+          "instance": "inst-1", "workspace": ""}]))
+    args = make_args(mode="sweep", index_file=str(index), tidy="true")
+    monkeypatch.setattr(addons_cli, "destroy_one", lambda *a, **k: None)
+    removed = []
+    def fake_update(a, aid, kind, tenant, ref, remove, manifest=None):
+        removed.append((aid, kind, tenant, remove))
+    monkeypatch.setattr(addons_cli, "update_addon_annotations", fake_update)
+    addons_cli.mode_sweep(args)
+    assert removed == [("waf", "instances", "gone", True)]
