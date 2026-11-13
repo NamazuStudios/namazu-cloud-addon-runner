@@ -576,7 +576,7 @@ DEFAULT_CONTRACT_VARS = (
 
 
 def build_backend_config(workdir: str, region: str, bucket: str, key: str) -> str:
-    path = os.path.join(workdir, "backend.hcl")
+    path = os.path.abspath(os.path.join(workdir, "backend.hcl"))
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(f"region = {json.dumps(region)}\n"
                  f"bucket = {json.dumps(bucket)}\n"
@@ -589,7 +589,7 @@ def emit_tfvars(workdir: str, tfvars: Dict[str, Any]) -> str:
     """Write the resolved (non-sensitive) vars to tfvars.json (0600); return
     its path. Sensitive values ride the env channel only (see
     write_sensitive_env) and are never written to disk."""
-    path = os.path.join(workdir, "terraform.tfvars.json")
+    path = os.path.abspath(os.path.join(workdir, "terraform.tfvars.json"))
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
         json.dump(tfvars, fh, indent=2, sort_keys=True)
