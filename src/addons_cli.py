@@ -730,7 +730,8 @@ def mode_apply_or_plan(args) -> None:
 
 
 def contract_vars(args, tenant_kind: Optional[str] = None,
-                  tenant_id: Optional[str] = None) -> Dict[str, Any]:
+                  tenant_id: Optional[str] = None,
+                  extra_pairs: Optional[List[str]] = None) -> Dict[str, Any]:
     vars: Dict[str, Any] = {"organization_id": args.organization_id}
     # The sweep's destroys are tenant-scoped by the STATE KEY they walk
     # (tenants/<kind>/<id>/addon_*.tfstate), not by job-level args — the
@@ -750,7 +751,11 @@ def contract_vars(args, tenant_kind: Optional[str] = None,
         val = getattr(args, key.replace("-", "_"), None)
         if val not in (None, ""):
             vars[key] = val
-    for pair in (args.contract or []):
+    # extra_pairs: the swept install's OWN contract (from addons.index.json)
+    # — an addon root's default-less required variables (e.g. the
+    # fast-storage class's storage_class_name) must be satisfied on destroy
+    # too, and the sweep job carries no --contract of its own.
+    for pair in list(args.contract or []) + list(extra_pairs or []):
         if "=" not in pair:
             raise ContractError(f"--contract expects key=json-or-scalar (got '{pair}')")
         k, raw = pair.split("=", 1)
@@ -795,7 +800,8 @@ def mode_sweep(args) -> None:
         ref = entry.get("ref") or ""
         variant = validate_variant(entry.get("variant"))
         kind, tenant = tenant_of(entry.get("instance"), entry.get("workspace"))
-        known[(aid, variant)] = {"repo": repo, "ref": ref}
+        known[(aid, variant)] = {"repo": repo, "ref": ref,
+                                 "contract": entry.get("contract") or ""}
         pairs[(aid, variant, kind, tenant)] = ref
     log(f"index: {len(known)} (addon, variant) id(s), {len(pairs)} install entries")
 
@@ -882,7 +888,13 @@ def destroy_one(args, aid: str, variant: str, meta: Dict[str, str], kind: str,
     # teardown must never depend on wiring still resolving.
     manifest = load_manifest(os.path.join(root, "manifest.yaml"),
                              args.organization_id)
-    tfvars = contract_vars(args, tenant_kind=kind, tenant_id=tenant)
+    # The destroyed install's OWN contract rides the index entry — the
+    # root's default-less required variables (e.g. storage_class_name) need
+    # it even on destroy; the sweep job carries none of its own.
+    entry_contract = [ln.strip() for ln in (meta.get("contract") or "").splitlines()
+                      if ln.strip() and not ln.strip().startswith("#")]
+    tfvars = contract_vars(args, tenant_kind=kind, tenant_id=tenant,
+                           extra_pairs=entry_contract)
     tfvars_path = emit_tfvars(os.path.join(root, "."), tfvars)
     backend = build_backend_config(root, args.region, args.bucket, state_key)
     tf_exec(root, ["-backend-config=" + backend], tfvars_path, {},
