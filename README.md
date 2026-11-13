@@ -166,3 +166,11 @@ code as published in this repository; work delivered to you under
 contract — including any official addon activated for a fee or custom
 addon authored for you — is delivered under that agreement, not under the
 license's reciprocity terms.
+<p align="center">
+  <a href="https://cloud.namazustudios.com">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="aws-partner-dark.png">
+      <img src="aws-partner-light.png" alt="AWS Partner" width="200">
+    </picture>
+  </a>
+</p>
