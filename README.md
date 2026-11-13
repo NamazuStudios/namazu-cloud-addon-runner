@@ -141,12 +141,12 @@ python3 -m pytest tests -q
 Part of the [Namazu Cloud Addon system](https://github.com/NamazuStudios/namazu-cloud-addon).
 
 This repository is made public for **transparency and visibility**: it is
-deeply connected to Namazu Cloud — the contract it enforces, the state
+deeply connected to [Namazu Cloud](https://cloud.namazustudios.com) — the contract it enforces, the state
 bijection it manages, and the tenant namespaces it serves ARE the platform.
 Publishing it lets every tenant and every org fork read exactly what the
 addon ecosystem does on their behalf.
 
-It is written **for Namazu Studios and Namazu Cloud use, and only us**: it
+It is written **for Namazu Studios and [Namazu Cloud](https://cloud.namazustudios.com) use, and only us**: it
 is the org-internal executor of the addon contract. Derivative works are
 expected to come back to us, **no exceptions** — AGPL-3.0's network
 copyleft applies to anything offering this as a service, and we ask that
