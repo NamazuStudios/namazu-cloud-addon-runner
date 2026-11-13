@@ -729,9 +729,17 @@ def mode_apply_or_plan(args) -> None:
                                  remove=False, manifest=manifest)
 
 
-def contract_vars(args) -> Dict[str, Any]:
+def contract_vars(args, tenant_kind: Optional[str] = None,
+                  tenant_id: Optional[str] = None) -> Dict[str, Any]:
     vars: Dict[str, Any] = {"organization_id": args.organization_id}
-    kind, tenant = tenant_of(args.instance, args.workspace)
+    # The sweep's destroys are tenant-scoped by the STATE KEY they walk
+    # (tenants/<kind>/<id>/addon_*.tfstate), not by job-level args — the
+    # sweep job passes no --instance/--workspace (the first real destroy
+    # died here with "exactly one of instance|workspace", 2026-11-13).
+    if tenant_kind and tenant_id:
+        kind, tenant = tenant_kind, tenant_id
+    else:
+        kind, tenant = tenant_of(args.instance, args.workspace)
     if kind == "instances":
         vars["instance_id"] = tenant
     else:
@@ -874,7 +882,7 @@ def destroy_one(args, aid: str, variant: str, meta: Dict[str, str], kind: str,
     # teardown must never depend on wiring still resolving.
     manifest = load_manifest(os.path.join(root, "manifest.yaml"),
                              args.organization_id)
-    tfvars = contract_vars(args)
+    tfvars = contract_vars(args, tenant_kind=kind, tenant_id=tenant)
     tfvars_path = emit_tfvars(os.path.join(root, "."), tfvars)
     backend = build_backend_config(root, args.region, args.bucket, state_key)
     tf_exec(root, ["-backend-config=" + backend], tfvars_path, {},
