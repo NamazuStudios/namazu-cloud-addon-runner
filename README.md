@@ -1,3 +1,7 @@
+<p align="center">
+  <a href="https://cloud.namazustudios.com"><img src="namazu-cloud.png" alt="Namazu Cloud" width="280"></a>
+</p>
+
 # namazu-cloud-addon-runner
 
 The contract-enforcement GitHub Action for the per-tenant addon ecosystem.
