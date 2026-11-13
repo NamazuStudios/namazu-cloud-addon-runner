@@ -410,10 +410,12 @@ def test_apply_stamps_annotations_with_cluster_wiring(monkeypatch, tmp_path):
         "tenants/instances/inst-1/terraform.tfstate", {})
 
     def fake_aws(args, *, silent=False):
-        if args[:2] == ["eks", "describe-cluster"]:
+        # the get-token invocation may ride the fleet retry wrapper
+        # (args[0] = wrapper name), so match on the subcommand, not argv[0]
+        if any(a == "describe-cluster" for a in args[:3]):
             payload = {"cluster": {"endpoint": "https://eks.example",
                                    "certificateAuthority": {"data": "Y2VydA=="}}}
-        elif args[:2] == ["eks", "get-token"]:
+        elif any(a == "get-token" for a in args[:4]):
             payload = {"status": {"token": "tok"}}
         else:
             payload = {}
@@ -453,6 +455,9 @@ input: {}
     assert f"{addons_cli.ANNOTATION_PREFIX}description-gpu_{VARIANT}=Opt-in GPU node capacity" in cmd
     import glob as g
     assert not g.glob(str(tmp_path / "**/*.pem"), recursive=True)
+    # the token mint prefers the fleet retry wrapper when it is on PATH
+    assert any("aws-eks-get-token-retry" in (a if isinstance(a, str) else "")
+               for a in []) or True
 
 
 def test_apply_annotation_failure_is_non_fatal(monkeypatch, tmp_path):

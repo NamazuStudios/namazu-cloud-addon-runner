@@ -195,6 +195,21 @@ def addon_annotations(addon_id: str, variant: str, manifest: Optional[Manifest],
     ]
 
 
+def _eks_get_token_cmd(region: str, cluster: str, role_arn: str
+                       ) -> Tuple[str, List[str]]:
+    """The get-token invocation, preferring the fleet's retry wrapper when
+    it is on PATH (the consuming fork's workflow puts bin/ there) — the raw
+    `aws eks get-token` races on the AWS CLI's local credential cache under
+    concurrency and fails with rc=254."""
+    args = ["eks", "get-token", "--cluster-name", cluster, "--region", region]
+    if role_arn:
+        args += ["--role-arn", role_arn]
+    wrapper = shutil.which("aws-eks-get-token-retry")
+    if wrapper:
+        return wrapper, args
+    return "aws", args
+
+
 def _kubectl_cluster_flags(region: str, cluster: str, role_arn: str
                            ) -> Tuple[List[str], str]:
     """One-off kubectl auth flags against the tenant cluster: real endpoint +
@@ -210,9 +225,8 @@ def _kubectl_cluster_flags(region: str, cluster: str, role_arn: str
         raise ExternalError(
             f"eks describe-cluster for '{cluster}' returned no endpoint/CA — "
             "cannot wire kubectl for namespace annotations")
-    token_doc = json.loads(aws(["eks", "get-token", "--cluster-name", cluster,
-                                "--region", region]
-                               + (["--role-arn", role_arn] if role_arn else []),
+    get_token_cmd, get_token_args = _eks_get_token_cmd(region, cluster, role_arn)
+    token_doc = json.loads(aws([get_token_cmd] + get_token_args,
                                silent=True).stdout or "{}")
     token = (token_doc.get("status") or {}).get("token")
     if not token:
