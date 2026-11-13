@@ -445,7 +445,19 @@ class OutputMenu:
     def from_statefile(cls, path: str) -> "OutputMenu":
         with open(path, encoding="utf-8") as fh:
             state = json.load(fh)
-        outputs = (((state.get("values") or {}).get("outputs")) or {})
+        # Two on-disk shapes carry outputs:
+        #   - `terraform show -json` state: outputs under .values.outputs
+        #   - the RAW terraform.tfstate the S3 backend stores: outputs at
+        #     the TOP LEVEL (.outputs) — same {name: {value, sensitive}}
+        #     shape. The tenant baselines' live statefiles are raw tfstates
+        #     (tf 1.9.8), so a .values.outputs-only read sees NOTHING and
+        #     every $instance.* binding fails its contract (observed
+        #     2026-11-13: "output 'karpenter_node_role_name' does not
+        #     exist in the referenced statefile" against statefiles that
+        #     carry exactly that output). Prefer the values.-shape, fall
+        #     back to the raw shape.
+        outputs = (((state.get("values") or {}).get("outputs"))
+                   or (state.get("outputs") or {}))
         menu: Dict[str, Dict[str, Any]] = {}
         for name, meta in (outputs or {}).items():
             menu[name] = {"value": meta.get("value"),
