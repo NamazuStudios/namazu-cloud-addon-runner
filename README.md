@@ -121,6 +121,68 @@ addon.cloud.namazustudios.com/description-<id>_<variant> = manifest.yaml descrip
   outcome stands. Skips entirely when the invocation has no
   `eks_cluster_name` wiring.
 
+## Security audit — the AI reviewer on every addon PR
+
+The **automatic AI security audit** (design: "Runner Feature: Automatic AI
+Security Audit" in the Addon System design notebook) reviews every addon
+PR: what least-privilege permissions the change requests, checked against
+the resources it touches, with risk flags and glaring concerns — posted as
+ONE sticky comment, updated on every push.
+
+- **Machine pass first:** the requested IAM permissions are parsed straight
+  out of the diff (`data "aws_iam_policy_document"`, `jsonencode` policies,
+  heredoc-JSON policies, trust policies) and fixed checks run on them:
+  wildcards, escalation primitives (`iam:PassRole`, `sts:AssumeRole`, ...),
+  trust-policy widening, coherence (action↔resource mismatch), and orphan
+  permissions (requested but unused in the root). Deterministic, with
+  file:line — these findings are always in the report.
+- **Agent pass second:** Bedrock Claude ranks, narrates, and proposes the
+  tighter alternative. PR content is DATA, never instructions; the agent
+  can only reference files the machine pass handed it — it cannot invent
+  permissions the code does not request.
+- **Trust:** static-only v1 — no plan, no state access, no S3. The ONLY AWS
+  credential is the tenant's **Bedrock-only role** (`bedrock:InvokeModel`,
+  nothing else), assumed via the fork's OIDC. The customer pays the audit
+  tokens.
+- **Advisory by default:** the job stays green unless the audit itself
+  errors; `fail-on: high` (strictly opt-in) turns HIGH findings into a
+  failing check. The comment posts regardless.
+
+Usage in an org fork's CI (requires `fetch-depth: 0` for the merge-base
+diff):
+
+```yaml
+  security-audit:
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: NamazuStudios/namazu-cloud-addon-runner/security-audit@v0.0.1
+        with:
+          aws-role-arn: ${{ secrets.AUDIT_BEDROCK_ROLE_ARN }}  # bedrock:InvokeModel ONLY
+          aws-region: us-east-1
+          # fail-on: high   # strictly opt-in
+```
+
+The Bedrock-only role (minimum policy — attach to the role the fork's OIDC
+may assume):
+
+```json
+{ "Version": "2012-10-17",
+  "Statement": [{ "Effect": "Allow",
+                  "Action": "bedrock:InvokeModel",
+                  "Resource": "arn:aws:bedrock:*::foundation-model/anthropic.*" }] }
+```
+
+Note: this is a separate composite action (`security-audit/action.yml`),
+deliberately NOT an `addons_cli.py` mode — the CLI's `audit` mode is
+already the read-only tfstate inventory.
+
 ## Trust model
 
 - The action NEVER assumes a role itself; run

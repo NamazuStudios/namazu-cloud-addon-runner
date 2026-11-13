@@ -1,0 +1,97 @@
+name: 'namazu-cloud-addon-security-audit'
+description: >-
+  Automatic AI security audit for addon PRs. A deterministic pre-pass parses
+  the requested IAM permissions (actions -> resources, with line numbers) out
+  of the changed Terraform and runs the fixed checks (wildcards, escalation
+  primitives, trust drift, coherence); Bedrock Claude then ranks the risk and
+  attaches ONE sticky report comment to the PR. Static-only v1: no plan, no
+  state access. The only credential is the tenant's Bedrock-only invoke role
+  (bedrock:InvokeModel, nothing else) — the customer pays the audit tokens.
+  Advisory by default; fail-on: high to gate. Requires the caller's checkout
+  to use fetch-depth: 0 (the merge-base diff needs the base branch).
+inputs:
+  aws-role-arn:
+    description: 'Bedrock-only role ARN — trust the org fork''s OIDC; allow bedrock:InvokeModel ONLY. The audit inherits this role''s credentials (the action never assumes roles itself; configure-aws-credentials does, here, with this input).'
+    required: true
+  aws-region:
+    description: 'AWS region of the Bedrock endpoint (and the role''s home).'
+    required: true
+  base-ref:
+    description: 'Merge-base ref for the PR diff. Leave default in pull_request context.'
+    required: false
+    default: 'origin/${{ github.base_ref }}'
+  model-id:
+    description: 'Bedrock model id for the reviewer. Sane default; override per tenant.'
+    required: false
+    default: 'us.anthropic.claude-haiku-4-5-v1:0'
+  fail-on:
+    description: 'off (default, advisory) | high — flip HIGH findings into a failing check. Strictly opt-in per fork.'
+    required: false
+    default: 'off'
+  max-files:
+    description: 'Agent depth cap: changed files beyond this get machine-pass only.'
+    required: false
+    default: '40'
+  token-budget:
+    description: 'Estimated prompt-token budget; over it, machine findings ship without narration.'
+    required: false
+    default: '60000'
+  max-tokens:
+    description: 'Bedrock max output tokens per run.'
+    required: false
+    default: '4000'
+outputs:
+  report-file:
+    description: 'Path of the written report markdown.'
+    value: ${{ github.workspace }}/security-audit-report.md
+  findings-high:
+    description: '"0" or "1" — HIGH findings present.'
+    value: ${{ steps.audit.outputs.findings-high }}
+runs:
+  using: composite
+  steps:
+    - name: Configure tenant Bedrock credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: ${{ inputs.aws-role-arn }}
+        aws-region: ${{ inputs.aws-region }}
+        role-session-name: namazu-addon-security-audit
+        role-duration-seconds: 900
+    - id: audit
+      shell: bash
+      env:
+        INPUT_AWS_REGION: ${{ inputs.aws-region }}
+        INPUT_MODEL_ID: ${{ inputs.model-id }}
+        INPUT_FAIL_ON: ${{ inputs.fail-on }}
+        INPUT_MAX_FILES: ${{ inputs.max-files }}
+        INPUT_TOKEN_BUDGET: ${{ inputs.token-budget }}
+        INPUT_MAX_TOKENS: ${{ inputs.max-tokens }}
+        INPUT_BASE_REF: ${{ inputs.base-ref }}
+      run: |
+        set -euo pipefail
+        python3 -m pip install --quiet --disable-pip-version-check 'boto3>=1.34' >/dev/null
+        git diff --merge-base "${INPUT_BASE_REF}" > /tmp/namazu-security-audit.diff
+        report="${GITHUB_WORKSPACE}/security-audit-report.md"
+        set +e
+        python3 "${{ github.action_path }}/../src/security_audit.py" \
+          --diff-file /tmp/namazu-security-audit.diff \
+          --repo-root . \
+          --out "$report" \
+          --aws-region "$INPUT_AWS_REGION" \
+          --model-id "$INPUT_MODEL_ID" \
+          --fail-on "$INPUT_FAIL_ON" \
+          --max-files "$INPUT_MAX_FILES" \
+          --token-budget "$INPUT_TOKEN_BUDGET" \
+          --max-tokens "$INPUT_MAX_TOKENS"
+        rc=$?
+        set -e
+        high=$(grep -c '^\*\*HIGH\*\*' "$report" 2>/dev/null || true)
+        {
+          echo "report-file=$report"
+          echo "findings-high=$([ "$high" -gt 0 ] 2>/dev/null && echo 1 || echo 0)"
+        } >> "$GITHUB_OUTPUT"
+        case "$rc" in
+          0) echo "[security-audit] advisory report posted";;
+          1) echo "[security-audit] fail-on: high — HIGH findings present"; exit 1;;
+          *) echo "[security-audit] AUDIT FAILURE (exit $rc)"; exit 1;;
+        esac

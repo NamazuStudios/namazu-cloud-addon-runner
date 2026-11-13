@@ -13,4 +13,4 @@ jobs:
         with: { python-version: '3.12' }
       - run: python3 -m pip install --quiet 'PyYAML>=6' pytest
       - run: python3 -m pytest tests -q
-      - run: python3 -m py_compile src/addons_cli.py
+      - run: python3 -m py_compile src/addons_cli.py src/security_audit.py
